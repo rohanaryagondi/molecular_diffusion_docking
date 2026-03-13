@@ -1,0 +1,47 @@
+# Tiny config for local testing on a MacBook
+data:
+  max_atoms: 38
+  num_atom_types: 10
+  num_bond_types: 5
+  dataset_path: data/raw/zinc250k.csv
+  processed_path: data/processed
+  train_split: 0.9
+
+model:
+  hidden_dim: 64
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.1
+
+diffusion:
+  num_timesteps: 50
+  beta_start: 1.0e-4
+  beta_end: 0.02
+
+training:
+  batch_size: 32
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-6
+  num_epochs: 3
+  grad_clip: 1.0
+  adj_loss_weight: 1.0
+  save_every: 1
+  log_every: 10
+  checkpoint_dir: checkpoints
+  log_dir: logs
+  use_amp: false
+  num_workers: 0
+
+generation:
+  num_samples: 20
+  batch_size: 20
+  output_path: results/generated.csv
+
+docking:
+  target_name: EGFR
+  target_pdb_id: "1M17"
+  center: [22.0, 0.5, 27.0]
+  box_size: [20.0, 20.0, 20.0]
+  exhaustiveness: 8
+  num_modes: 9
+  output_path: results/docking_results.csv

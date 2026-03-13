@@ -1,0 +1,60 @@
+# =============================================================================
+# Molecular Diffusion Model Configuration
+# =============================================================================
+# This file defines ALL hyperparameters for the pipeline.
+# Override any value via command-line: python train.py --config configs/default.yaml
+
+# --- Data ---
+data:
+  max_atoms: 38             # Largest molecule in ZINC250K (heavy atoms only)
+  num_atom_types: 10        # 9 real atoms (C,N,O,F,P,S,Cl,Br,I) + 1 virtual/padding
+  num_bond_types: 5         # 0=none, 1=single, 2=double, 3=triple, 4=aromatic
+  dataset_path: data/raw/zinc250k.csv
+  processed_path: data/processed
+  train_split: 0.9
+
+# --- Score Network (the GNN that predicts noise) ---
+model:
+  hidden_dim: 256           # Internal representation size per node
+  num_layers: 6             # Graph Transformer layers (depth of message passing)
+  num_heads: 8              # Multi-head attention heads
+  dropout: 0.1
+
+# --- Diffusion Process ---
+diffusion:
+  num_timesteps: 1000       # T: number of noise levels (more = finer, slower)
+  beta_start: 1.0e-4        # Starting noise rate (very small noise)
+  beta_end: 0.02            # Ending noise rate (heavy noise)
+  # The schedule linearly interpolates between beta_start and beta_end.
+  # At t=0 the molecule is clean; at t=T it's pure Gaussian noise.
+
+# --- Training ---
+training:
+  batch_size: 128
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-6
+  num_epochs: 200
+  grad_clip: 1.0            # Gradient clipping norm (stabilizes training)
+  adj_loss_weight: 1.0      # Weight for adjacency loss vs node loss
+  save_every: 10            # Save checkpoint every N epochs
+  log_every: 100            # Log metrics every N steps
+  checkpoint_dir: checkpoints
+  log_dir: logs
+  use_amp: true             # Mixed precision training (faster on A100/H200)
+  num_workers: 4            # DataLoader workers
+
+# --- Generation ---
+generation:
+  num_samples: 1000         # Generate this many candidate molecules
+  batch_size: 256           # Generation batch size (no gradients, can be larger)
+  output_path: results/generated.csv
+
+# --- Docking ---
+docking:
+  target_name: EGFR
+  target_pdb_id: "1M17"    # EGFR kinase (well-studied cancer target)
+  center: [22.0, 0.5, 27.0]  # Binding site center (Angstroms)
+  box_size: [20.0, 20.0, 20.0]  # Search box dimensions
+  exhaustiveness: 8         # Vina search thoroughness (higher = slower but better)
+  num_modes: 9              # Number of binding poses to generate
+  output_path: results/docking_results.csv
