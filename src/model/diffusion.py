@@ -33,9 +33,25 @@ MOLECULAR SPECIFICS:
       - A: round -> bond type (0 = no bond, 1-4 = bond types)
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def _cosine_alpha_bar_schedule(num_timesteps, s=0.008):
+    """Cosine schedule from Nichol & Dhariwal (2021, Improved DDPM).
+
+    Produces a smoother SNR curve than linear, preserving more signal at
+    early timesteps and destroying it more gradually.
+    """
+    steps = torch.arange(num_timesteps + 1, dtype=torch.float64)
+    f_t = torch.cos(((steps / num_timesteps) + s) / (1 + s) * (math.pi / 2)) ** 2
+    alpha_bars = f_t / f_t[0]
+    # Derive betas from consecutive alpha_bar ratios
+    betas = 1.0 - (alpha_bars[1:] / alpha_bars[:-1])
+    return torch.clamp(betas, min=0.0, max=0.999).float()
 
 
 class GaussianDiffusion:
@@ -52,18 +68,23 @@ class GaussianDiffusion:
         num_timesteps: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
+        schedule: str = "cosine",
+        importance_sampling: bool = True,
         device: str = "cpu",
     ):
         self.num_timesteps = num_timesteps
         self.device = device
+        self.importance_sampling = importance_sampling
 
         # ---- Noise Schedule ----
-        # Linear schedule: beta increases linearly from beta_start to beta_end.
-        # Small beta at start = gentle noise; large beta at end = aggressive noise.
-        betas = torch.linspace(beta_start, beta_end, num_timesteps)
+        if schedule == "cosine":
+            betas = _cosine_alpha_bar_schedule(num_timesteps)
+        else:
+            # Linear schedule (original): beta increases linearly.
+            betas = torch.linspace(beta_start, beta_end, num_timesteps)
 
         alphas = 1.0 - betas
-        alpha_bars = torch.cumprod(alphas, dim=0)  # cumulative product
+        alpha_bars = torch.cumprod(alphas, dim=0)
 
         # Pre-compute useful quantities (avoids recomputation during training)
         self.betas = betas.to(device)
@@ -72,6 +93,13 @@ class GaussianDiffusion:
         self.sqrt_alpha_bars = torch.sqrt(alpha_bars).to(device)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars).to(device)
         self.sqrt_alphas = torch.sqrt(alphas).to(device)
+
+        # Importance sampling weights: sample noisier timesteps more often
+        if importance_sampling:
+            weights = self.sqrt_one_minus_alpha_bars
+            self.timestep_probs = (weights / weights.sum()).to(device)
+        else:
+            self.timestep_probs = None
 
     def to(self, device):
         """Move all schedule tensors to a device."""
@@ -82,6 +110,8 @@ class GaussianDiffusion:
         self.sqrt_alpha_bars = self.sqrt_alpha_bars.to(device)
         self.sqrt_one_minus_alpha_bars = self.sqrt_one_minus_alpha_bars.to(device)
         self.sqrt_alphas = self.sqrt_alphas.to(device)
+        if self.timestep_probs is not None:
+            self.timestep_probs = self.timestep_probs.to(device)
         return self
 
     # ---- Forward Process (Adding Noise) ----
@@ -139,9 +169,13 @@ class GaussianDiffusion:
         """
         B = X_0.shape[0]
         device = X_0.device
+        T = self.num_timesteps
 
-        # 1. Random timesteps for each sample in the batch
-        t = torch.randint(0, self.num_timesteps, (B,), device=device)
+        # 1. Sample timesteps (importance-weighted or uniform)
+        if self.importance_sampling and self.timestep_probs is not None:
+            t = torch.multinomial(self.timestep_probs, B, replacement=True)
+        else:
+            t = torch.randint(0, T, (B,), device=device)
 
         # 2. Add noise to both X and A
         X_t, noise_X = self.q_sample(X_0, t)
@@ -170,6 +204,17 @@ class GaussianDiffusion:
             noise_A * edge_mask,
             reduction="sum",
         ) / edge_mask.sum().clamp(min=1)
+
+        # Apply importance sampling correction: weight each sample by 1/(T*p(t))
+        # This keeps the expected loss unbiased despite non-uniform sampling.
+        if self.importance_sampling and self.timestep_probs is not None:
+            w = 1.0 / (T * self.timestep_probs[t] + 1e-8)
+            w = w / w.mean()  # normalize so weights average to 1
+            # Reweight: compute per-sample losses, then weight
+            per_sample_loss_X = ((pred_noise_X - noise_X) ** 2 * node_mask).sum(dim=(1, 2))
+            per_sample_loss_A = ((pred_noise_A - noise_A) ** 2 * edge_mask).sum(dim=(1, 2))
+            loss_X = (w * per_sample_loss_X).mean() / node_mask[0].sum().clamp(min=1)
+            loss_A = (w * per_sample_loss_A).mean() / edge_mask[0].sum().clamp(min=1)
 
         total_loss = loss_X + adj_loss_weight * loss_A
         return total_loss, loss_X.item(), loss_A.item()

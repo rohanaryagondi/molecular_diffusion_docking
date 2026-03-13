@@ -23,10 +23,10 @@ model:
 # --- Diffusion Process ---
 diffusion:
   num_timesteps: 1000       # T: number of noise levels (more = finer, slower)
-  beta_start: 1.0e-4        # Starting noise rate (very small noise)
-  beta_end: 0.02            # Ending noise rate (heavy noise)
-  # The schedule linearly interpolates between beta_start and beta_end.
-  # At t=0 the molecule is clean; at t=T it's pure Gaussian noise.
+  schedule: cosine          # "cosine" (Nichol & Dhariwal 2021) or "linear"
+  beta_start: 1.0e-4        # Only used if schedule=linear
+  beta_end: 0.02            # Only used if schedule=linear
+  importance_sampling: true  # Weight noisier timesteps more during training
 
 # --- Training ---
 training:
@@ -34,10 +34,13 @@ training:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-6
   num_epochs: 200
+  warmup_steps: 1000        # Linear LR warmup before cosine decay
+  ema_decay: 0.9999         # Exponential moving average for generation weights
   grad_clip: 1.0            # Gradient clipping norm (stabilizes training)
   adj_loss_weight: 1.0      # Weight for adjacency loss vs node loss
   save_every: 10            # Save checkpoint every N epochs
   log_every: 100            # Log metrics every N steps
+  validate_every: 20        # Generate molecules and check validity every N epochs
   checkpoint_dir: checkpoints
   log_dir: logs
   use_amp: true             # Mixed precision training (faster on A100/H200)

@@ -26,6 +26,8 @@ Usage:
 import os
 import sys
 import argparse
+import copy
+import math
 import time
 import yaml
 import torch
@@ -37,6 +39,37 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data.dataset import MolecularGraphDataset
 from src.model.score_network import ScoreNetwork
 from src.model.diffusion import GaussianDiffusion
+from src.data.featurizer import graph_to_mol
+from src.chemistry.validity import check_validity
+
+
+# ---- EMA (Exponential Moving Average) ----
+
+class EMA:
+    """Maintains an exponential moving average of model parameters.
+
+    EMA weights produce smoother, more robust predictions at generation time.
+    Standard practice for diffusion models (decay=0.9999).
+    """
+
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.shadow = {name: p.clone().detach()
+                       for name, p in model.named_parameters() if p.requires_grad}
+
+    def update(self, model):
+        for name, p in model.named_parameters():
+            if p.requires_grad and name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(p.data, alpha=1.0 - self.decay)
+
+    def state_dict(self):
+        return {name: p.clone() for name, p in self.shadow.items()}
+
+    def load_into(self, model):
+        """Load EMA weights into a model (for generation)."""
+        for name, p in model.named_parameters():
+            if name in self.shadow:
+                p.data.copy_(self.shadow[name])
 
 
 def train(config_path: str):
@@ -90,11 +123,17 @@ def train(config_path: str):
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {num_params:,}")
 
+    # ---- EMA ----
+    ema_decay = train_cfg.get("ema_decay", 0.9999)
+    ema = EMA(model, decay=ema_decay)
+
     # ---- Diffusion ----
     diffusion = GaussianDiffusion(
         num_timesteps=diff_cfg["num_timesteps"],
-        beta_start=diff_cfg["beta_start"],
-        beta_end=diff_cfg["beta_end"],
+        beta_start=diff_cfg.get("beta_start", 1e-4),
+        beta_end=diff_cfg.get("beta_end", 0.02),
+        schedule=diff_cfg.get("schedule", "cosine"),
+        importance_sampling=diff_cfg.get("importance_sampling", True),
         device=device,
     )
 
@@ -105,10 +144,18 @@ def train(config_path: str):
         weight_decay=train_cfg["weight_decay"],
     )
 
-    # Cosine annealing schedule (learning rate decays smoothly to ~0)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=train_cfg["num_epochs"]
-    )
+    # LR schedule: linear warmup then cosine decay (per step, not per epoch)
+    warmup_steps = train_cfg.get("warmup_steps", 1000)
+    steps_per_epoch = max(len(train_loader), 1)
+    total_steps = steps_per_epoch * train_cfg["num_epochs"]
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(warmup_steps, 1)
+        progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # Mixed precision (faster on A100/H200)
     scaler = torch.amp.GradScaler("cuda", enabled=train_cfg.get("use_amp", False))
@@ -119,15 +166,18 @@ def train(config_path: str):
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # ---- Training Loop ----
+    schedule_name = diff_cfg.get("schedule", "cosine")
     print(f"\nStarting training for {train_cfg['num_epochs']} epochs ...")
     print(f"  Batch size: {train_cfg['batch_size']}")
-    print(f"  Learning rate: {train_cfg['learning_rate']}")
-    print(f"  Diffusion timesteps: {diff_cfg['num_timesteps']}")
+    print(f"  Learning rate: {train_cfg['learning_rate']} (warmup: {warmup_steps} steps)")
+    print(f"  Diffusion timesteps: {diff_cfg['num_timesteps']} ({schedule_name} schedule)")
+    print(f"  EMA decay: {ema_decay}")
     print(f"  Mixed precision: {use_amp}")
     print()
 
     best_val_loss = float("inf")
     global_step = 0
+    validate_every = train_cfg.get("validate_every", 0)
 
     for epoch in range(1, train_cfg["num_epochs"] + 1):
         model.train()
@@ -162,6 +212,10 @@ def train(config_path: str):
 
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()  # step per optimizer step (not per epoch)
+
+            # Update EMA weights
+            ema.update(model)
 
             epoch_loss += loss.item()
             epoch_loss_x += loss_x
@@ -177,8 +231,6 @@ def train(config_path: str):
                     f"(X: {loss_x:.4f}, A: {loss_a:.4f}) | "
                     f"LR: {scheduler.get_last_lr()[0]:.2e}"
                 )
-
-        scheduler.step()
 
         # ---- Epoch Summary ----
         avg_loss = epoch_loss / num_batches
@@ -207,12 +259,17 @@ def train(config_path: str):
         avg_val_loss = val_loss / max(val_batches, 1)
         print(f"  Val Loss: {avg_val_loss:.4f}")
 
+        # ---- Validity Check (periodic) ----
+        if validate_every > 0 and epoch % validate_every == 0:
+            _run_validity_check(model, diffusion, data_cfg, device)
+
         # ---- Save Checkpoints ----
         if epoch % train_cfg["save_every"] == 0:
             ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch}.pt")
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "ema_state_dict": ema.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "train_loss": avg_loss,
@@ -227,6 +284,7 @@ def train(config_path: str):
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "ema_state_dict": ema.state_dict(),
                 "config": config,
                 "val_loss": best_val_loss,
             }, best_path)
@@ -235,6 +293,26 @@ def train(config_path: str):
         print()
 
     print(f"Training complete. Best val loss: {best_val_loss:.4f}")
+
+
+@torch.no_grad()
+def _run_validity_check(model, diffusion, data_cfg, device, num_samples=64):
+    """Generate a small batch and report validity percentage."""
+    model.eval()
+    X_gen, A_gen = diffusion.sample(
+        model,
+        num_samples=num_samples,
+        max_atoms=data_cfg["max_atoms"],
+        num_atom_types=data_cfg["num_atom_types"],
+    )
+    virtual_idx = data_cfg["num_atom_types"] - 1
+    masks = (X_gen.argmax(dim=-1) != virtual_idx).float()
+    valid = 0
+    for i in range(num_samples):
+        mol = graph_to_mol(X_gen[i].cpu(), A_gen[i].cpu(), masks[i].cpu())
+        if mol is not None and check_validity(mol):
+            valid += 1
+    print(f"  Validity check: {valid}/{num_samples} = {valid/num_samples:.1%}")
 
 
 if __name__ == "__main__":

@@ -59,15 +59,26 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
         dropout=model_cfg["dropout"],
     ).to(device)
 
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # Prefer EMA weights (smoother, better generation quality)
+    if "ema_state_dict" in checkpoint:
+        ema_sd = checkpoint["ema_state_dict"]
+        model_sd = model.state_dict()
+        for name in ema_sd:
+            if name in model_sd:
+                model_sd[name] = ema_sd[name]
+        model.load_state_dict(model_sd)
+        print(f"Model loaded with EMA weights (trained for {checkpoint['epoch']} epochs)")
+    else:
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Model loaded (trained for {checkpoint['epoch']} epochs)")
     model.eval()
-    print(f"Model loaded (trained for {checkpoint['epoch']} epochs)")
 
     # ---- Rebuild Diffusion ----
     diffusion = GaussianDiffusion(
         num_timesteps=diff_cfg["num_timesteps"],
-        beta_start=diff_cfg["beta_start"],
-        beta_end=diff_cfg["beta_end"],
+        beta_start=diff_cfg.get("beta_start", 1e-4),
+        beta_end=diff_cfg.get("beta_end", 0.02),
+        schedule=diff_cfg.get("schedule", "cosine"),
         device=device,
     )
 
