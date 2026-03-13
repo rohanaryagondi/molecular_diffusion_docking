@@ -140,7 +140,10 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
 
     # ---- Save Results ----
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-    df = pd.DataFrame(results)
+    if results:
+        df = pd.DataFrame(results)
+    else:
+        df = pd.DataFrame(columns=["smiles", "qed", "num_atoms", "molecular_weight", "logp", "novel"])
     df.to_csv(output_path, index=False)
     print(f"\nSaved {len(results)} molecules with properties to {output_path}")
 

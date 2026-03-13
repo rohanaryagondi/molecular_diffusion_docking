@@ -60,12 +60,13 @@ def train(config_path: str):
     train_dataset = MolecularGraphDataset(data_cfg["processed_path"], split="train")
     val_dataset = MolecularGraphDataset(data_cfg["processed_path"], split="val")
 
+    pin = device.type == "cuda"
     train_loader = DataLoader(
         train_dataset,
         batch_size=train_cfg["batch_size"],
         shuffle=True,
         num_workers=train_cfg["num_workers"],
-        pin_memory=True,
+        pin_memory=pin,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -73,7 +74,7 @@ def train(config_path: str):
         batch_size=train_cfg["batch_size"],
         shuffle=False,
         num_workers=train_cfg["num_workers"],
-        pin_memory=True,
+        pin_memory=pin,
     )
 
     # ---- Model ----

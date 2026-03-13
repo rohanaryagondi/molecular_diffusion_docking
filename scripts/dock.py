@@ -47,7 +47,13 @@ def dock(
     # ---- Load Generated Molecules ----
     print(f"Loading molecules from {molecules_path} ...")
     df = pd.read_csv(molecules_path)
-    smiles_list = df["smiles"].tolist()
+    if df.empty or "smiles" not in df.columns:
+        print("No molecules found in input file. Run generation first with a trained model.")
+        return
+    smiles_list = df["smiles"].dropna().tolist()
+    if not smiles_list:
+        print("No valid SMILES found in input file.")
+        return
     print(f"Loaded {len(smiles_list)} molecules")
 
     # Filter for drug-like molecules (Lipinski passes) to reduce docking time

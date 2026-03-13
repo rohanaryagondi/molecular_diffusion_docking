@@ -97,9 +97,13 @@ def preprocess(config_path: str = "configs/default.yaml"):
     print(f"Val set ({len(val_idx)} molecules) saved to {val_path}")
 
     # Save the original SMILES for novelty checking later
+    # Track successfully converted SMILES alongside their tensors
     smiles_path = os.path.join(output_dir, "train_smiles.txt")
-    successful_smiles = [s for s in smiles_list if smiles_to_graph(s) is not None]
-    train_smiles = [successful_smiles[i] for i in train_idx.tolist() if i < len(successful_smiles)]
+    successful_smiles = []
+    for smiles in smiles_list:
+        if smiles_to_graph(smiles) is not None:
+            successful_smiles.append(smiles)
+    train_smiles = [successful_smiles[i] for i in train_idx.tolist()]
     with open(smiles_path, "w") as f:
         for s in train_smiles:
             f.write(s + "\n")
