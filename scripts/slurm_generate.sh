@@ -33,6 +33,10 @@ python scripts/generate.py \
     --num_samples 1000 \
     --output results/generated.csv
 
+# ---- Push results to GitHub ----
+echo "Pushing results to GitHub ..."
+bash scripts/push_results.sh "Generation complete (job $SLURM_JOB_ID)" || echo "Push failed (non-fatal)"
+
 echo "======================================"
 echo "End time: $(date)"
 echo "======================================"

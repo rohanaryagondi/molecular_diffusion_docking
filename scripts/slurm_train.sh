@@ -40,6 +40,10 @@ mkdir -p logs checkpoints
 # ---- Train ----
 python scripts/train.py --config configs/default.yaml
 
+# ---- Push results to GitHub ----
+echo "Pushing results to GitHub ..."
+bash scripts/push_results.sh "Training complete (job $SLURM_JOB_ID)" || echo "Push failed (non-fatal)"
+
 echo "======================================"
 echo "End time: $(date)"
 echo "======================================"

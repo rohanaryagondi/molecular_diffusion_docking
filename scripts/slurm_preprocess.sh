@@ -1,18 +1,18 @@
 #!/bin/bash
-#SBATCH --job-name=moldiff_dock
+#SBATCH --job-name=moldiff_prep
 #SBATCH --partition=day
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=04:00:00
-#SBATCH --output=logs/dock_%j.out
-#SBATCH --error=logs/dock_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --output=logs/preprocess_%j.out
+#SBATCH --error=logs/preprocess_%j.err
 
 # =============================================================================
-# Molecular Docking Job (Bouchet) - CPU only
+# Molecular Diffusion Model - Preprocessing Job (Bouchet)
 # =============================================================================
-# AutoDock Vina is CPU-based, so no GPU needed.
-# Run AFTER generation completes.
-# Submit with:  sbatch scripts/slurm_dock.sh
+# CPU-only: converts SMILES -> graph tensors + QED labels.
+# Run AFTER download_data.py, BEFORE training.
+# Submit with:  sbatch scripts/slurm_preprocess.sh
 # =============================================================================
 
 echo "======================================"
@@ -25,16 +25,16 @@ module purge
 
 source .venv/bin/activate
 
-mkdir -p results data/protein
+mkdir -p data/processed logs
 
-python scripts/dock.py \
-    --molecules results/generated.csv \
-    --config configs/default.yaml \
-    --top_k 5
+# ---- Download data if needed ----
+if [ ! -f data/raw/zinc250k.csv ]; then
+    echo "Downloading ZINC250K ..."
+    python scripts/download_data.py
+fi
 
-# ---- Push results to GitHub ----
-echo "Pushing results to GitHub ..."
-bash scripts/push_results.sh "Docking complete (job $SLURM_JOB_ID)" || echo "Push failed (non-fatal)"
+# ---- Preprocess ----
+python scripts/preprocess.py --config configs/default.yaml
 
 echo "======================================"
 echo "End time: $(date)"

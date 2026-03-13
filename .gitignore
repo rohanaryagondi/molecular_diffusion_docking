@@ -3,11 +3,11 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-*.csv
 *.sdf
 *.pdb
 *.pdbqt
 !configs/*.yaml
+!runs/**/*.csv
 
 # Model artifacts
 checkpoints/*.pt
