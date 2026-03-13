@@ -50,6 +50,7 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
     print(f"Using device: {device}")
 
     # ---- Rebuild Model ----
+    atom_feature_dim = data_cfg.get("atom_feature_dim", data_cfg["num_atom_types"])
     model = ScoreNetwork(
         num_atom_types=data_cfg["num_atom_types"],
         num_bond_types=data_cfg["num_bond_types"],
@@ -57,6 +58,7 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
         num_layers=model_cfg["num_layers"],
         num_heads=model_cfg["num_heads"],
         dropout=model_cfg["dropout"],
+        atom_feature_dim=atom_feature_dim,
     ).to(device)
 
     # Prefer EMA weights (smoother, better generation quality)
@@ -86,18 +88,33 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
     gen_cfg = config.get("generation", {})
     batch_size = gen_cfg.get("batch_size", 256)
 
-    print(f"\nGenerating {num_samples} molecules ...")
+    sampler = gen_cfg.get("sampler", "ddpm")
+    temperature = gen_cfg.get("temperature", 1.0)
+    print(f"\nGenerating {num_samples} molecules (sampler={sampler}, temp={temperature}) ...")
     all_X, all_A = [], []
     remaining = num_samples
 
     while remaining > 0:
         bs = min(batch_size, remaining)
-        X_gen, A_gen = diffusion.sample(
-            model,
-            num_samples=bs,
-            max_atoms=data_cfg["max_atoms"],
-            num_atom_types=data_cfg["num_atom_types"],
-        )
+        if sampler == "ddim":
+            X_gen, A_gen = diffusion.ddim_sample(
+                model,
+                num_samples=bs,
+                max_atoms=data_cfg["max_atoms"],
+                num_atom_types=atom_feature_dim,
+                num_bond_types=data_cfg["num_bond_types"],
+                num_inference_steps=gen_cfg.get("ddim_steps", 100),
+                eta=gen_cfg.get("ddim_eta", 0.0),
+                temperature=temperature,
+            )
+        else:
+            X_gen, A_gen = diffusion.sample(
+                model,
+                num_samples=bs,
+                max_atoms=data_cfg["max_atoms"],
+                num_atom_types=atom_feature_dim,
+                num_bond_types=data_cfg["num_bond_types"],
+            )
         all_X.append(X_gen.cpu())
         all_A.append(A_gen.cpu())
         remaining -= bs
@@ -108,9 +125,11 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
     # ---- Convert to Molecules & Validate ----
     print("\nConverting to molecules and validating ...")
 
-    # Create masks: nodes whose argmax is NOT the virtual type are "real"
-    virtual_type_idx = data_cfg["num_atom_types"] - 1
-    masks = (X_all.argmax(dim=-1) != virtual_type_idx).float()
+    # Create masks: nodes whose atom-type argmax is NOT the virtual type are "real"
+    # Only look at the first num_atom_types dims (atom type one-hot portion)
+    nat = data_cfg["num_atom_types"]
+    virtual_type_idx = nat - 1
+    masks = (X_all[:, :, :nat].argmax(dim=-1) != virtual_type_idx).float()
 
     mol_list = []
     smiles_list = []

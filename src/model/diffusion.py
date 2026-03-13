@@ -199,11 +199,16 @@ class GaussianDiffusion:
 
         # Adjacency loss: only on real atom pairs
         edge_mask = mask.unsqueeze(1) * mask.unsqueeze(2)  # (B, N, N)
+        # Expand edge_mask for multi-channel adjacency (B, N, N) -> (B, N, N, 1)
+        if pred_noise_A.dim() == 4:
+            edge_mask_a = edge_mask.unsqueeze(-1)
+        else:
+            edge_mask_a = edge_mask
         loss_A = F.mse_loss(
-            pred_noise_A * edge_mask,
-            noise_A * edge_mask,
+            pred_noise_A * edge_mask_a,
+            noise_A * edge_mask_a,
             reduction="sum",
-        ) / edge_mask.sum().clamp(min=1)
+        ) / edge_mask_a.sum().clamp(min=1)
 
         # Apply importance sampling correction: weight each sample by 1/(T*p(t))
         # This keeps the expected loss unbiased despite non-uniform sampling.
@@ -211,8 +216,11 @@ class GaussianDiffusion:
             w = 1.0 / (T * self.timestep_probs[t] + 1e-8)
             w = w / w.mean()  # normalize so weights average to 1
             # Reweight: compute per-sample losses, then weight
-            per_sample_loss_X = ((pred_noise_X - noise_X) ** 2 * node_mask).sum(dim=(1, 2))
-            per_sample_loss_A = ((pred_noise_A - noise_A) ** 2 * edge_mask).sum(dim=(1, 2))
+            # Sum over all non-batch dims
+            x_dims = tuple(range(1, pred_noise_X.dim()))
+            a_dims = tuple(range(1, pred_noise_A.dim()))
+            per_sample_loss_X = ((pred_noise_X - noise_X) ** 2 * node_mask).sum(dim=x_dims)
+            per_sample_loss_A = ((pred_noise_A - noise_A) ** 2 * edge_mask_a).sum(dim=a_dims)
             loss_X = (w * per_sample_loss_X).mean() / node_mask[0].sum().clamp(min=1)
             loss_A = (w * per_sample_loss_A).mean() / edge_mask[0].sum().clamp(min=1)
 
@@ -265,12 +273,18 @@ class GaussianDiffusion:
 
         # Mask out padding
         X_t = X_t * mask.unsqueeze(-1)
-        A_t = A_t * mask.unsqueeze(1) * mask.unsqueeze(2)
+        # A_t may be (B, N, N) or (B, N, N, C) -- mask spatial dims
+        edge_mask = mask.unsqueeze(1) * mask.unsqueeze(2)  # (B, N, N)
+        if A_t.dim() == 4:
+            A_t = A_t * edge_mask.unsqueeze(-1)
+        else:
+            A_t = A_t * edge_mask
 
         return X_t, A_t
 
     @torch.no_grad()
-    def sample(self, model, num_samples, max_atoms, num_atom_types, mask=None):
+    def sample(self, model, num_samples, max_atoms, num_atom_types,
+               num_bond_types=5, mask=None):
         """
         Generate molecules by running the full reverse process: t=T -> t=0.
 
@@ -278,18 +292,19 @@ class GaussianDiffusion:
             model:          trained ScoreNetwork
             num_samples:    how many molecules to generate
             max_atoms:      padded molecule size
-            num_atom_types: number of atom types
+            num_atom_types: number of atom types (or atom_feature_dim)
+            num_bond_types: number of bond type channels
 
         Returns:
             X: (num_samples, max_atoms, num_atom_types) generated node features
-            A: (num_samples, max_atoms, max_atoms) generated adjacency
+            A: (num_samples, max_atoms, max_atoms, num_bond_types) generated adjacency
         """
         device = self.device
         model.eval()
 
         # Start from pure Gaussian noise
         X_t = torch.randn(num_samples, max_atoms, num_atom_types, device=device)
-        A_t = torch.randn(num_samples, max_atoms, max_atoms, device=device)
+        A_t = torch.randn(num_samples, max_atoms, max_atoms, num_bond_types, device=device)
         A_t = (A_t + A_t.transpose(1, 2)) / 2  # start symmetric
 
         # Use full mask (all nodes active) -- the model decides which to "turn off"
@@ -302,5 +317,102 @@ class GaussianDiffusion:
 
             if t % 100 == 0:
                 print(f"  Sampling step {self.num_timesteps - t}/{self.num_timesteps}")
+
+        return X_t, A_t
+
+    # ---- DDIM Sampling (Fast Deterministic Generation) ----
+
+    @torch.no_grad()
+    def ddim_sample(self, model, num_samples, max_atoms, num_atom_types,
+                    num_bond_types=5, num_inference_steps=100, eta=0.0,
+                    temperature=1.0, mask=None):
+        """
+        Generate molecules using DDIM (Song et al., 2020) for faster sampling.
+
+        DDIM skips timesteps (e.g., 100 steps instead of 1000) and can be
+        fully deterministic (eta=0). Temperature < 1 produces more conservative
+        (higher validity) molecules.
+
+        Args:
+            model:              trained ScoreNetwork
+            num_samples:        how many molecules to generate
+            max_atoms:          padded molecule size
+            num_atom_types:     atom feature dimension
+            num_bond_types:     bond type channels
+            num_inference_steps: number of denoising steps (< num_timesteps)
+            eta:                0 = deterministic DDIM, 1 = stochastic (like DDPM)
+            temperature:        scale noise predictions (< 1 = conservative)
+
+        Returns:
+            X, A: generated node features and adjacency tensors
+        """
+        device = self.device
+        model.eval()
+        T = self.num_timesteps
+
+        # Compute strided timestep schedule
+        step_size = T // num_inference_steps
+        timesteps = list(range(0, T, step_size))[:num_inference_steps]
+        timesteps = list(reversed(timesteps))
+
+        # Start from pure noise
+        X_t = torch.randn(num_samples, max_atoms, num_atom_types, device=device)
+        A_t = torch.randn(num_samples, max_atoms, max_atoms, num_bond_types, device=device)
+        A_t = (A_t + A_t.transpose(1, 2)) / 2
+
+        if mask is None:
+            mask = torch.ones(num_samples, max_atoms, device=device)
+
+        for i, t_cur in enumerate(timesteps):
+            t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else 0
+            B = X_t.shape[0]
+            t_tensor = torch.full((B,), t_cur, device=device, dtype=torch.long)
+
+            # Predict noise
+            eps_X, eps_A = model(X_t, A_t, mask, t_tensor)
+            eps_X = eps_X * temperature
+            eps_A = eps_A * temperature
+
+            # Current and previous alpha_bar
+            ab_t = self.alpha_bars[t_cur]
+            ab_prev = self.alpha_bars[t_prev] if t_prev > 0 else torch.tensor(1.0, device=device)
+
+            # Predict x_0 from x_t and eps
+            x0_pred_X = (X_t - torch.sqrt(1 - ab_t) * eps_X) / torch.sqrt(ab_t)
+            x0_pred_A = (A_t - torch.sqrt(1 - ab_t) * eps_A) / torch.sqrt(ab_t)
+
+            # DDIM variance
+            sigma = eta * torch.sqrt(
+                (1 - ab_prev) / (1 - ab_t) * (1 - ab_t / ab_prev)
+            ) if t_cur > 0 else torch.tensor(0.0, device=device)
+
+            # Direction pointing to x_t
+            dir_X = torch.sqrt(1 - ab_prev - sigma ** 2) * eps_X
+            dir_A = torch.sqrt(1 - ab_prev - sigma ** 2) * eps_A
+
+            # DDIM step
+            X_t = torch.sqrt(ab_prev) * x0_pred_X + dir_X
+            A_t = torch.sqrt(ab_prev) * x0_pred_A + dir_A
+
+            if sigma > 0:
+                noise_X = torch.randn_like(X_t) * sigma
+                noise_A = torch.randn_like(A_t) * sigma
+                noise_A = (noise_A + noise_A.transpose(1, 2)) / 2
+                X_t = X_t + noise_X
+                A_t = A_t + noise_A
+
+            # Symmetrize A
+            A_t = (A_t + A_t.transpose(1, 2)) / 2
+
+            # Mask padding
+            X_t = X_t * mask.unsqueeze(-1)
+            edge_mask = mask.unsqueeze(1) * mask.unsqueeze(2)
+            if A_t.dim() == 4:
+                A_t = A_t * edge_mask.unsqueeze(-1)
+            else:
+                A_t = A_t * edge_mask
+
+            if (i + 1) % max(len(timesteps) // 5, 1) == 0:
+                print(f"  DDIM step {i+1}/{len(timesteps)}")
 
         return X_t, A_t

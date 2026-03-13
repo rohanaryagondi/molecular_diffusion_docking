@@ -8,7 +8,8 @@
 data:
   max_atoms: 38             # Largest molecule in ZINC250K (heavy atoms only)
   num_atom_types: 10        # 9 real atoms (C,N,O,F,P,S,Cl,Br,I) + 1 virtual/padding
-  num_bond_types: 5         # 0=none, 1=single, 2=double, 3=triple, 4=aromatic
+  atom_feature_dim: 28      # Extended features: atom_type(10) + charge(5) + degree(6) + implH(5) + arom(1) + ring(1)
+  num_bond_types: 5         # 0=none, 1=single, 2=double, 3=triple, 4=aromatic (one-hot adjacency)
   dataset_path: data/raw/zinc250k.csv
   processed_path: data/processed
   train_split: 0.9
@@ -50,6 +51,10 @@ training:
 generation:
   num_samples: 1000         # Generate this many candidate molecules
   batch_size: 256           # Generation batch size (no gradients, can be larger)
+  sampler: ddim             # "ddpm" (full T steps) or "ddim" (fast, skip steps)
+  ddim_steps: 100           # DDIM inference steps (only if sampler=ddim)
+  ddim_eta: 0.0             # 0 = deterministic, 1 = stochastic (like DDPM)
+  temperature: 0.8          # < 1.0 = more conservative, higher validity
   output_path: results/generated.csv
 
 # --- Docking ---

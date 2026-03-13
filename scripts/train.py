@@ -111,6 +111,7 @@ def train(config_path: str):
     )
 
     # ---- Model ----
+    atom_feature_dim = data_cfg.get("atom_feature_dim", data_cfg["num_atom_types"])
     model = ScoreNetwork(
         num_atom_types=data_cfg["num_atom_types"],
         num_bond_types=data_cfg["num_bond_types"],
@@ -118,6 +119,7 @@ def train(config_path: str):
         num_layers=model_cfg["num_layers"],
         num_heads=model_cfg["num_heads"],
         dropout=model_cfg["dropout"],
+        atom_feature_dim=atom_feature_dim,
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -299,14 +301,17 @@ def train(config_path: str):
 def _run_validity_check(model, diffusion, data_cfg, device, num_samples=64):
     """Generate a small batch and report validity percentage."""
     model.eval()
+    atom_feature_dim = data_cfg.get("atom_feature_dim", data_cfg["num_atom_types"])
     X_gen, A_gen = diffusion.sample(
         model,
         num_samples=num_samples,
         max_atoms=data_cfg["max_atoms"],
-        num_atom_types=data_cfg["num_atom_types"],
+        num_atom_types=atom_feature_dim,
+        num_bond_types=data_cfg["num_bond_types"],
     )
-    virtual_idx = data_cfg["num_atom_types"] - 1
-    masks = (X_gen.argmax(dim=-1) != virtual_idx).float()
+    nat = data_cfg["num_atom_types"]
+    virtual_idx = nat - 1
+    masks = (X_gen[:, :, :nat].argmax(dim=-1) != virtual_idx).float()
     valid = 0
     for i in range(num_samples):
         mol = graph_to_mol(X_gen[i].cpu(), A_gen[i].cpu(), masks[i].cpu())
