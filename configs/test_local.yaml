@@ -47,6 +47,12 @@ generation:
   temperature: 0.8
   output_path: results/generated.csv
 
+guidance:
+  num_classes: 3
+  p_uncond: 0.1
+  guidance_scale: 3.0
+  guide_class: 2
+
 docking:
   target_name: EGFR
   target_pdb_id: "1M17"

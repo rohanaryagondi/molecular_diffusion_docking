@@ -51,6 +51,8 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
 
     # ---- Rebuild Model ----
     atom_feature_dim = data_cfg.get("atom_feature_dim", data_cfg["num_atom_types"])
+    guidance_cfg = config.get("guidance", {})
+    num_classes = guidance_cfg.get("num_classes", 3)
     model = ScoreNetwork(
         num_atom_types=data_cfg["num_atom_types"],
         num_bond_types=data_cfg["num_bond_types"],
@@ -59,6 +61,7 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
         num_heads=model_cfg["num_heads"],
         dropout=model_cfg["dropout"],
         atom_feature_dim=atom_feature_dim,
+        num_classes=num_classes,
     ).to(device)
 
     # Prefer EMA weights (smoother, better generation quality)
@@ -90,12 +93,21 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
 
     sampler = gen_cfg.get("sampler", "ddpm")
     temperature = gen_cfg.get("temperature", 1.0)
-    print(f"\nGenerating {num_samples} molecules (sampler={sampler}, temp={temperature}) ...")
+    guidance_scale = guidance_cfg.get("guidance_scale", 1.0)
+    guide_class = guidance_cfg.get("guide_class", 2)  # default: high QED
+    print(f"\nGenerating {num_samples} molecules (sampler={sampler}, temp={temperature}, "
+          f"guidance_scale={guidance_scale}, class={guide_class}) ...")
     all_X, all_A = [], []
     remaining = num_samples
 
     while remaining > 0:
         bs = min(batch_size, remaining)
+        # Create guidance labels (all same class for targeted generation)
+        if guidance_scale > 1.0:
+            labels = torch.full((bs,), guide_class, device=device, dtype=torch.long)
+        else:
+            labels = None
+
         if sampler == "ddim":
             X_gen, A_gen = diffusion.ddim_sample(
                 model,
@@ -106,6 +118,9 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
                 num_inference_steps=gen_cfg.get("ddim_steps", 100),
                 eta=gen_cfg.get("ddim_eta", 0.0),
                 temperature=temperature,
+                labels=labels,
+                guidance_scale=guidance_scale,
+                num_classes=num_classes,
             )
         else:
             X_gen, A_gen = diffusion.sample(
@@ -114,6 +129,9 @@ def generate(checkpoint_path: str, num_samples: int, output_path: str):
                 max_atoms=data_cfg["max_atoms"],
                 num_atom_types=atom_feature_dim,
                 num_bond_types=data_cfg["num_bond_types"],
+                labels=labels,
+                guidance_scale=guidance_scale,
+                num_classes=num_classes,
             )
         all_X.append(X_gen.cpu())
         all_A.append(A_gen.cpu())

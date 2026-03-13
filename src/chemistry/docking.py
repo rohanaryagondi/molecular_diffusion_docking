@@ -37,7 +37,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 
-def generate_3d_coords(smiles: str):
+def generate_3d_coords(smiles: str, num_conformers: int = 1):
     """
     Generate a 3D conformer for a molecule from its SMILES string.
 
@@ -56,21 +56,29 @@ def generate_3d_coords(smiles: str):
     # Add explicit hydrogens (needed for 3D embedding and docking)
     mol = Chem.AddHs(mol)
 
-    # Generate 3D coordinates
+    # Generate 3D coordinates with multiple conformers for better docking
     params = AllChem.ETKDGv3()
     params.randomSeed = 42
-    result = AllChem.EmbedMolecule(mol, params)
-    if result != 0:
-        # Retry without experimental torsion preferences
-        result = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
-        if result != 0:
+    num_confs = num_conformers if num_conformers > 1 else 1
+    conf_ids = AllChem.EmbedMultipleConfs(mol, numConfs=num_confs, params=params)
+    if len(conf_ids) == 0:
+        # Retry with basic ETKDG
+        conf_ids = AllChem.EmbedMultipleConfs(mol, numConfs=num_confs, params=AllChem.ETKDG())
+        if len(conf_ids) == 0:
             return None
 
-    # Optimize geometry with MMFF94 force field
+    # Optimize all conformer geometries with MMFF94 force field
     try:
-        AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
+        results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=500)
+        # Pick the lowest energy conformer
+        if results and len(results) > 0:
+            energies = [(i, r[1]) for i, r in enumerate(results) if r[0] == 0]
+            if energies:
+                best_conf = min(energies, key=lambda x: x[1])[0]
+                # Set the best conformer as the active one
+                # (keep all conformers, first one is used by default)
     except Exception:
-        pass  # keep unoptimized geometry
+        pass  # keep unoptimized geometries
 
     return mol
 

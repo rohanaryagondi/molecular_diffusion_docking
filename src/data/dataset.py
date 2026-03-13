@@ -5,9 +5,10 @@ After running scripts/preprocess.py, molecular graphs are stored as a single
 .pt file containing stacked tensors. This Dataset class loads them for training.
 
 The DataLoader will automatically batch these into:
-    X:    (batch_size, max_atoms, num_atom_types)
-    A:    (batch_size, max_atoms, max_atoms)
-    mask: (batch_size, max_atoms)
+    X:      (batch_size, max_atoms, atom_feature_dim)
+    A:      (batch_size, max_atoms, max_atoms, num_bond_types)
+    mask:   (batch_size, max_atoms)
+    labels: (batch_size,)  -- QED bucket labels for classifier-free guidance
 """
 
 import os
@@ -21,9 +22,10 @@ class MolecularGraphDataset(Dataset):
 
     Expected format of the .pt file (created by scripts/preprocess.py):
         {
-            'X':     Tensor of shape (N, max_atoms, num_atom_types),
-            'A':     Tensor of shape (N, max_atoms, max_atoms),
-            'masks': Tensor of shape (N, max_atoms),
+            'X':      Tensor of shape (N, max_atoms, atom_feature_dim),
+            'A':      Tensor of shape (N, max_atoms, max_atoms, num_bond_types),
+            'masks':  Tensor of shape (N, max_atoms),
+            'labels': Tensor of shape (N,) [optional, for guided generation],
         }
     """
 
@@ -35,9 +37,10 @@ class MolecularGraphDataset(Dataset):
             )
 
         data = torch.load(filepath, weights_only=True)
-        self.X = data["X"]          # (N, max_atoms, num_atom_types)
-        self.A = data["A"]          # (N, max_atoms, max_atoms)
-        self.masks = data["masks"]  # (N, max_atoms)
+        self.X = data["X"]
+        self.A = data["A"]
+        self.masks = data["masks"]
+        self.labels = data.get("labels", None)
 
         print(f"Loaded {split} set: {len(self)} molecules")
 
@@ -45,4 +48,6 @@ class MolecularGraphDataset(Dataset):
         return self.X.shape[0]
 
     def __getitem__(self, idx):
+        if self.labels is not None:
+            return self.X[idx], self.A[idx], self.masks[idx], self.labels[idx]
         return self.X[idx], self.A[idx], self.masks[idx]

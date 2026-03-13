@@ -21,8 +21,19 @@ SA SCORE (Synthetic Accessibility):
     Scale of 1 (easy) to 10 (very hard). From Ertl & Schuffenhauer (2009).
 """
 
+import os
+import sys
+
 from rdkit import Chem
-from rdkit.Chem import Descriptors, QED
+from rdkit.Chem import Descriptors, QED, RDConfig
+
+# Import SA Score from RDKit contrib
+sys.path.append(os.path.join(RDConfig.RDContribDir, "SA_Score"))
+try:
+    import sascorer
+    _HAS_SA_SCORER = True
+except ImportError:
+    _HAS_SA_SCORER = False
 
 
 def lipinski_rule_of_five(mol):
@@ -67,6 +78,16 @@ def compute_qed(mol):
         return 0.0
 
 
+def compute_sa_score(mol):
+    """Compute Synthetic Accessibility score. Range: 1 (easy) to 10 (hard)."""
+    if mol is None or not _HAS_SA_SCORER:
+        return 10.0
+    try:
+        return round(sascorer.calculateScore(mol), 2)
+    except Exception:
+        return 10.0
+
+
 def compute_properties(smiles: str):
     """
     Compute all drug-likeness properties for a SMILES string.
@@ -79,13 +100,15 @@ def compute_properties(smiles: str):
 
     lipinski = lipinski_rule_of_five(mol)
     qed_score = compute_qed(mol)
+    sa_score = compute_sa_score(mol)
 
     return {
         "smiles": smiles,
         "qed": qed_score,
+        "sa_score": sa_score,
         "num_atoms": mol.GetNumAtoms(),
         "num_rings": Descriptors.RingCount(mol),
         "num_rotatable_bonds": Descriptors.NumRotatableBonds(mol),
-        "tpsa": round(Descriptors.TPSA(mol), 2),  # topological polar surface area
+        "tpsa": round(Descriptors.TPSA(mol), 2),
         **lipinski,
     }

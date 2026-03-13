@@ -112,6 +112,7 @@ def train(config_path: str):
 
     # ---- Model ----
     atom_feature_dim = data_cfg.get("atom_feature_dim", data_cfg["num_atom_types"])
+    guidance_cfg = config.get("guidance", {})
     model = ScoreNetwork(
         num_atom_types=data_cfg["num_atom_types"],
         num_bond_types=data_cfg["num_bond_types"],
@@ -120,6 +121,7 @@ def train(config_path: str):
         num_heads=model_cfg["num_heads"],
         dropout=model_cfg["dropout"],
         atom_feature_dim=atom_feature_dim,
+        num_classes=guidance_cfg.get("num_classes", 3),
     ).to(device)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -180,6 +182,7 @@ def train(config_path: str):
     best_val_loss = float("inf")
     global_step = 0
     validate_every = train_cfg.get("validate_every", 0)
+    num_classes = guidance_cfg.get("num_classes", 3)
 
     for epoch in range(1, train_cfg["num_epochs"] + 1):
         model.train()
@@ -189,7 +192,15 @@ def train(config_path: str):
         num_batches = 0
         t_start = time.time()
 
-        for batch_idx, (X, A, mask) in enumerate(train_loader):
+        for batch_idx, batch in enumerate(train_loader):
+            # Dataset returns (X, A, mask) or (X, A, mask, label)
+            if len(batch) == 4:
+                X, A, mask, labels = batch
+                labels = labels.to(device)
+            else:
+                X, A, mask = batch
+                labels = None
+
             X = X.to(device)
             A = A.to(device)
             mask = mask.to(device)
@@ -197,10 +208,14 @@ def train(config_path: str):
             optimizer.zero_grad()
 
             # Forward pass with optional mixed precision
+            p_uncond = guidance_cfg.get("p_uncond", 0.1)
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss, loss_x, loss_a = diffusion.training_loss(
                     model, X, A, mask,
                     adj_loss_weight=train_cfg.get("adj_loss_weight", 1.0),
+                    labels=labels,
+                    p_uncond=p_uncond,
+                    num_classes=num_classes,
                 )
 
             # Backward pass
@@ -251,10 +266,19 @@ def train(config_path: str):
         val_loss = 0.0
         val_batches = 0
         with torch.no_grad():
-            for X, A, mask in val_loader:
+            for batch in val_loader:
+                if len(batch) == 4:
+                    X, A, mask, labels = batch
+                    labels = labels.to(device)
+                else:
+                    X, A, mask = batch
+                    labels = None
                 X, A, mask = X.to(device), A.to(device), mask.to(device)
                 with torch.amp.autocast("cuda", enabled=use_amp):
-                    loss, _, _ = diffusion.training_loss(model, X, A, mask)
+                    loss, _, _ = diffusion.training_loss(
+                        model, X, A, mask, labels=labels,
+                        p_uncond=0.0, num_classes=num_classes,
+                    )
                 val_loss += loss.item()
                 val_batches += 1
 

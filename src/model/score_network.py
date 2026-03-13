@@ -44,6 +44,7 @@ class ScoreNetwork(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.1,
         atom_feature_dim: int = None,
+        num_classes: int = 3,
     ):
         super().__init__()
         # atom_feature_dim defaults to num_atom_types for backward compatibility
@@ -55,6 +56,10 @@ class ScoreNetwork(nn.Module):
 
         # Time embedding: scalar t -> vector of size hidden_dim
         self.time_embed = SinusoidalTimeEmbedding(hidden_dim)
+
+        # Class label embedding for classifier-free guidance
+        # num_classes real classes + 1 null/unconditional token
+        self.label_embed = nn.Embedding(num_classes + 1, hidden_dim)
 
         # --- Graph Transformer Backbone ---
         self.layers = nn.ModuleList([
@@ -86,13 +91,15 @@ class ScoreNetwork(nn.Module):
         A_t: torch.Tensor,
         mask: torch.Tensor,
         t: torch.Tensor,
+        labels: torch.Tensor = None,
     ):
         """
         Args:
-            X_t:  (B, N, atom_feature_dim) noisy node features (continuous)
-            A_t:  (B, N, N, num_bond_types) noisy adjacency (continuous, one-hot)
-            mask: (B, N) node mask
-            t:    (B,) integer timesteps
+            X_t:    (B, N, atom_feature_dim) noisy node features (continuous)
+            A_t:    (B, N, N, num_bond_types) noisy adjacency (continuous, one-hot)
+            mask:   (B, N) node mask
+            t:      (B,) integer timesteps
+            labels: (B,) class labels (0..num_classes-1), or None for unconditional
 
         Returns:
             eps_X: (B, N, atom_feature_dim) predicted node noise
@@ -104,6 +111,11 @@ class ScoreNetwork(nn.Module):
         h = self.atom_embed(X_t)                    # (B, N, D)
         t_emb = self.time_embed(t)                   # (B, D)
         h = h + t_emb.unsqueeze(1)                   # broadcast time to all nodes
+
+        # Add class label embedding (classifier-free guidance)
+        if labels is not None:
+            l_emb = self.label_embed(labels)         # (B, D)
+            h = h + l_emb.unsqueeze(1)               # broadcast label to all nodes
 
         # For the GNN layers, we need integer adjacency for edge bias.
         # A_t is (B, N, N, num_bond_types) continuous -- argmax to get integer type.

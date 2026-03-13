@@ -147,7 +147,8 @@ class GaussianDiffusion:
 
     # ---- Training Loss ----
 
-    def training_loss(self, model, X_0, A_0, mask, adj_loss_weight=1.0):
+    def training_loss(self, model, X_0, A_0, mask, adj_loss_weight=1.0,
+                      labels=None, p_uncond=0.1, num_classes=3):
         """
         Compute the denoising score matching loss for one batch.
 
@@ -163,6 +164,9 @@ class GaussianDiffusion:
             A_0:    (B, N, N) clean adjacency
             mask:   (B, N) node mask
             adj_loss_weight: relative weight for adjacency loss
+            labels: (B,) class labels for classifier-free guidance, or None
+            p_uncond: probability of dropping labels (unconditional training)
+            num_classes: number of real classes (null token = num_classes)
 
         Returns:
             total_loss, loss_X, loss_A
@@ -185,8 +189,14 @@ class GaussianDiffusion:
         noise_A = (noise_A + noise_A.transpose(1, 2)) / 2
         A_t = (A_t + A_t.transpose(1, 2)) / 2
 
-        # 3. Predict noise
-        pred_noise_X, pred_noise_A = model(X_t, A_t, mask, t)
+        # 3. Randomly drop labels to null token for classifier-free guidance training
+        if labels is not None:
+            drop_mask = torch.rand(B, device=device) < p_uncond
+            labels = labels.clone()
+            labels[drop_mask] = num_classes  # null token index
+
+        # 4. Predict noise
+        pred_noise_X, pred_noise_A = model(X_t, A_t, mask, t, labels=labels)
 
         # 4. Compute masked MSE loss
         # Node loss: only on real atoms
@@ -230,7 +240,8 @@ class GaussianDiffusion:
     # ---- Reverse Process (Generation) ----
 
     @torch.no_grad()
-    def p_sample_step(self, model, X_t, A_t, mask, t_index):
+    def p_sample_step(self, model, X_t, A_t, mask, t_index,
+                      labels=None, guidance_scale=1.0, num_classes=3):
         """
         One step of the reverse process: x_t -> x_{t-1}.
 
@@ -239,14 +250,27 @@ class GaussianDiffusion:
 
         where z ~ N(0, I) and sigma_t = sqrt(beta_t).
         At t=0 we don't add noise (the final sample should be deterministic).
+
+        With classifier-free guidance (guidance_scale > 1):
+            eps = eps_uncond + w * (eps_cond - eps_uncond)
         """
         B = X_t.shape[0]
         device = X_t.device
 
         t_tensor = torch.full((B,), t_index, device=device, dtype=torch.long)
 
-        # Predict noise
-        pred_noise_X, pred_noise_A = model(X_t, A_t, mask, t_tensor)
+        # Predict noise (with optional classifier-free guidance)
+        if labels is not None and guidance_scale != 1.0:
+            # Conditional prediction
+            pred_noise_X_c, pred_noise_A_c = model(X_t, A_t, mask, t_tensor, labels=labels)
+            # Unconditional prediction (null token)
+            null_labels = torch.full((B,), num_classes, device=device, dtype=torch.long)
+            pred_noise_X_u, pred_noise_A_u = model(X_t, A_t, mask, t_tensor, labels=null_labels)
+            # Guided combination
+            pred_noise_X = pred_noise_X_u + guidance_scale * (pred_noise_X_c - pred_noise_X_u)
+            pred_noise_A = pred_noise_A_u + guidance_scale * (pred_noise_A_c - pred_noise_A_u)
+        else:
+            pred_noise_X, pred_noise_A = model(X_t, A_t, mask, t_tensor, labels=labels)
 
         # Retrieve schedule values
         beta_t = self.betas[t_index]
@@ -284,7 +308,8 @@ class GaussianDiffusion:
 
     @torch.no_grad()
     def sample(self, model, num_samples, max_atoms, num_atom_types,
-               num_bond_types=5, mask=None):
+               num_bond_types=5, mask=None, labels=None,
+               guidance_scale=1.0, num_classes=3):
         """
         Generate molecules by running the full reverse process: t=T -> t=0.
 
@@ -294,6 +319,9 @@ class GaussianDiffusion:
             max_atoms:      padded molecule size
             num_atom_types: number of atom types (or atom_feature_dim)
             num_bond_types: number of bond type channels
+            labels:         (num_samples,) class labels for guided generation
+            guidance_scale: classifier-free guidance weight (1.0 = no guidance)
+            num_classes:    number of real classes
 
         Returns:
             X: (num_samples, max_atoms, num_atom_types) generated node features
@@ -313,7 +341,11 @@ class GaussianDiffusion:
 
         # Reverse diffusion: T-1, T-2, ..., 1, 0
         for t in reversed(range(self.num_timesteps)):
-            X_t, A_t = self.p_sample_step(model, X_t, A_t, mask, t)
+            X_t, A_t = self.p_sample_step(
+                model, X_t, A_t, mask, t,
+                labels=labels, guidance_scale=guidance_scale,
+                num_classes=num_classes,
+            )
 
             if t % 100 == 0:
                 print(f"  Sampling step {self.num_timesteps - t}/{self.num_timesteps}")
@@ -325,7 +357,8 @@ class GaussianDiffusion:
     @torch.no_grad()
     def ddim_sample(self, model, num_samples, max_atoms, num_atom_types,
                     num_bond_types=5, num_inference_steps=100, eta=0.0,
-                    temperature=1.0, mask=None):
+                    temperature=1.0, mask=None, labels=None,
+                    guidance_scale=1.0, num_classes=3):
         """
         Generate molecules using DDIM (Song et al., 2020) for faster sampling.
 
@@ -368,8 +401,15 @@ class GaussianDiffusion:
             B = X_t.shape[0]
             t_tensor = torch.full((B,), t_cur, device=device, dtype=torch.long)
 
-            # Predict noise
-            eps_X, eps_A = model(X_t, A_t, mask, t_tensor)
+            # Predict noise (with optional classifier-free guidance)
+            if labels is not None and guidance_scale != 1.0:
+                eps_X_c, eps_A_c = model(X_t, A_t, mask, t_tensor, labels=labels)
+                null_labels = torch.full((B,), num_classes, device=device, dtype=torch.long)
+                eps_X_u, eps_A_u = model(X_t, A_t, mask, t_tensor, labels=null_labels)
+                eps_X = eps_X_u + guidance_scale * (eps_X_c - eps_X_u)
+                eps_A = eps_A_u + guidance_scale * (eps_A_c - eps_A_u)
+            else:
+                eps_X, eps_A = model(X_t, A_t, mask, t_tensor, labels=labels)
             eps_X = eps_X * temperature
             eps_A = eps_A * temperature
 

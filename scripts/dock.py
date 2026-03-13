@@ -6,10 +6,11 @@ Takes the generated molecules and docks them against a target protein
 
 Pipeline:
     1. Load generated molecules from CSV
-    2. Download and prepare the target protein
-    3. Dock each molecule using AutoDock Vina
-    4. Rank by binding affinity (most negative = best)
-    5. Select top 5 candidates
+    2. Multi-stage filtering: Lipinski -> SA score -> TPSA -> QED
+    3. Download and prepare the target protein
+    4. Dock each molecule using AutoDock Vina
+    5. Rank by binding affinity (most negative = best)
+    6. Select top 5 candidates
 
 The final deliverable: 5 novel, chemically valid molecules with
 predicted binding affinity scores.
@@ -31,6 +32,65 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.chemistry.docking import download_protein, prepare_receptor, dock_batch
 from src.chemistry.properties import compute_properties
+
+
+def _filter_molecules(smiles_list):
+    """Multi-stage filtering pipeline with statistics at each stage."""
+    print(f"\n{'='*50}")
+    print("FILTERING PIPELINE")
+    print(f"{'='*50}")
+    print(f"  Input molecules:     {len(smiles_list)}")
+
+    # Compute all properties once
+    all_props = []
+    for smi in smiles_list:
+        props = compute_properties(smi)
+        if props:
+            all_props.append(props)
+
+    print(f"  Valid (parseable):   {len(all_props)}")
+    if not all_props:
+        return []
+
+    # Stage 1: Lipinski
+    lipinski_pass = [p for p in all_props if p["passes"]]
+    print(f"  Lipinski pass:       {len(lipinski_pass)}")
+
+    # Stage 2: SA score < 5 (synthesizable)
+    sa_pass = [p for p in lipinski_pass if p.get("sa_score", 10) < 5]
+    print(f"  SA score < 5:        {len(sa_pass)}")
+
+    # Stage 3: TPSA 40-140 (good oral bioavailability)
+    tpsa_pass = [p for p in sa_pass if 40 <= p.get("tpsa", 0) <= 140]
+    print(f"  TPSA 40-140:         {len(tpsa_pass)}")
+
+    # Stage 4: QED > 0.4 (drug-like)
+    qed_pass = [p for p in tpsa_pass if p["qed"] > 0.4]
+    print(f"  QED > 0.4:           {len(qed_pass)}")
+
+    # Fall back to less filtered sets if too few candidates survive
+    if len(qed_pass) >= 5:
+        candidates = qed_pass
+    elif len(tpsa_pass) >= 5:
+        print("  (Relaxing QED filter)")
+        candidates = tpsa_pass
+    elif len(sa_pass) >= 5:
+        print("  (Relaxing TPSA filter)")
+        candidates = sa_pass
+    elif len(lipinski_pass) >= 5:
+        print("  (Relaxing SA filter)")
+        candidates = lipinski_pass
+    else:
+        print("  (Using all valid molecules)")
+        candidates = all_props
+
+    # Sort by QED descending
+    candidates.sort(key=lambda p: p["qed"], reverse=True)
+    max_dock = min(len(candidates), 200)
+    print(f"  Docking candidates:  {max_dock}")
+    print(f"{'='*50}\n")
+
+    return [p["smiles"] for p in candidates[:max_dock]]
 
 
 def dock(
@@ -56,28 +116,15 @@ def dock(
         return
     print(f"Loaded {len(smiles_list)} molecules")
 
-    # Filter for drug-like molecules (Lipinski passes) to reduce docking time
-    print("Pre-filtering for drug-likeness ...")
-    drug_like = []
-    for smi in smiles_list:
-        props = compute_properties(smi)
-        if props and props["passes"]:
-            drug_like.append(smi)
-
-    print(f"Drug-like molecules: {len(drug_like)} / {len(smiles_list)}")
-
-    if len(drug_like) == 0:
-        print("No drug-like molecules found. Using all valid molecules instead.")
-        drug_like = smiles_list
-
-    # Limit to a reasonable number for docking (it's slow)
-    max_dock = min(len(drug_like), 100)
-    dock_candidates = drug_like[:max_dock]
-    print(f"Docking {max_dock} molecules ...")
+    # ---- Multi-Stage Filtering ----
+    dock_candidates = _filter_molecules(smiles_list)
+    if not dock_candidates:
+        print("No candidates survived filtering. Try generating more molecules.")
+        return
 
     # ---- Prepare Protein ----
     pdb_id = dock_cfg["target_pdb_id"]
-    print(f"\nPreparing target protein: {dock_cfg['target_name']} (PDB: {pdb_id})")
+    print(f"Preparing target protein: {dock_cfg['target_name']} (PDB: {pdb_id})")
 
     pdb_path = download_protein(pdb_id)
     receptor_path = prepare_receptor(pdb_path)
@@ -118,12 +165,13 @@ def dock(
         print(f"  SMILES:           {result['smiles']}")
         print(f"  Binding Affinity: {result['binding_affinity_kcal_mol']:.2f} kcal/mol")
 
-        # Also compute properties for the top candidates
         props = compute_properties(result["smiles"])
         if props:
             print(f"  Mol. Weight:      {props['molecular_weight']:.1f} Da")
             print(f"  LogP:             {props['logp']:.2f}")
             print(f"  QED:              {props['qed']:.3f}")
+            print(f"  SA Score:         {props.get('sa_score', 'N/A')}")
+            print(f"  TPSA:             {props['tpsa']:.1f}")
             print(f"  H-Bond Donors:    {props['h_bond_donors']}")
             print(f"  H-Bond Acceptors: {props['h_bond_acceptors']}")
             print(f"  Lipinski:         {'PASS' if props['passes'] else 'FAIL'}")

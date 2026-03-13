@@ -57,6 +57,13 @@ generation:
   temperature: 0.8          # < 1.0 = more conservative, higher validity
   output_path: results/generated.csv
 
+# --- Classifier-Free Guidance ---
+guidance:
+  num_classes: 3              # QED buckets: 0=low, 1=medium, 2=high
+  p_uncond: 0.1               # Probability of dropping label during training
+  guidance_scale: 3.0          # w: higher = stronger push toward target class
+  guide_class: 2               # Target class for generation (2 = high QED)
+
 # --- Docking ---
 docking:
   target_name: EGFR
