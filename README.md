@@ -29,6 +29,8 @@ Score-based generative modeling (DDPM) for *de novo* molecular design, with dock
 
 ### Local Setup
 ```bash
+git clone https://github.com/rohanaryagondi/molecular_diffusion_docking.git
+cd molecular_diffusion_docking
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -37,12 +39,21 @@ pip install -e .
 
 ### Bouchet HPC (Yale YCRC)
 ```bash
-# On login node:
+# On login node — clone to scratch (home has limited quota):
+cd ~/scratch60
+git clone https://github.com/rohanaryagondi/molecular_diffusion_docking.git
+cd molecular_diffusion_docking
+
+# Set up environment:
 module load CUDA/12.6.0
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
+
+# Configure git for auto-push (needed for push_results.sh):
+git config user.name "Your Name"
+git config user.email "your.email@yale.edu"
 ```
 
 ## Running the Pipeline
