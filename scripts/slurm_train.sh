@@ -16,10 +16,15 @@
 # Check logs:   tail -f logs/train_<jobid>.out
 # =============================================================================
 
+# ---- Project directory ----
+PROJECT_DIR="/nfs/roberts/project/pi_mg269/rag88/molecule_dd_module13/molecular_diffusion_docking"
+cd "$PROJECT_DIR" || { echo "ERROR: Cannot cd to $PROJECT_DIR"; exit 1; }
+
 echo "======================================"
 echo "Job ID:     $SLURM_JOB_ID"
 echo "Node:       $SLURM_NODELIST"
 echo "GPUs:       $CUDA_VISIBLE_DEVICES"
+echo "Working dir: $(pwd)"
 echo "Start time: $(date)"
 echo "======================================"
 
@@ -28,13 +33,12 @@ module purge
 module load CUDA/12.6.0
 
 # ---- Environment ----
-# Create venv once: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && pip install -e .
 source .venv/bin/activate
 
 # Verify GPU is visible
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA available: {torch.cuda.is_available()}, GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"none\"}')"
 
-# ---- Create log directory ----
+# ---- Create directories ----
 mkdir -p logs checkpoints
 
 # ---- Train ----

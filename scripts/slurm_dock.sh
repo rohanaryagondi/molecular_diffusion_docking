@@ -15,9 +15,14 @@
 # Submit with:  sbatch scripts/slurm_dock.sh
 # =============================================================================
 
+# ---- Project directory ----
+PROJECT_DIR="/nfs/roberts/project/pi_mg269/rag88/molecule_dd_module13/molecular_diffusion_docking"
+cd "$PROJECT_DIR" || { echo "ERROR: Cannot cd to $PROJECT_DIR"; exit 1; }
+
 echo "======================================"
 echo "Job ID:     $SLURM_JOB_ID"
 echo "Node:       $SLURM_NODELIST"
+echo "Working dir: $(pwd)"
 echo "Start time: $(date)"
 echo "======================================"
 

@@ -39,8 +39,8 @@ pip install -e .
 
 ### Bouchet HPC (Yale YCRC)
 ```bash
-# On login node — clone to scratch (home has limited quota):
-cd ~/scratch60
+# On login node — clone to project space (home has limited quota):
+cd /nfs/roberts/project/pi_mg269/rag88/molecule_dd_module13
 git clone https://github.com/rohanaryagondi/molecular_diffusion_docking.git
 cd molecular_diffusion_docking
 
