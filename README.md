@@ -44,12 +44,19 @@ cd /nfs/roberts/project/pi_mg269/rag88/molecule_dd_module13
 git clone https://github.com/rohanaryagondi/molecular_diffusion_docking.git
 cd molecular_diffusion_docking
 
-# Set up environment:
+# Create venv on login node:
 module load CUDA/12.6.0
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+
+# Install packages in an interactive job (login node kills large pip installs):
+salloc --partition=day --cpus-per-task=4 --mem=16G --time=00:30:00
+cd /nfs/roberts/project/pi_mg269/rag88/molecule_dd_module13/molecular_diffusion_docking
+module load CUDA/12.6.0
+source .venv/bin/activate
+pip install --no-cache-dir -r requirements.txt
 pip install -e .
+exit  # back to login node
 
 # Configure git for auto-push (needed for push_results.sh):
 git config user.name "Your Name"
